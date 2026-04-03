@@ -51,7 +51,11 @@ jobs:
           merge-multiple: true
       - name: Execute Plotting Notebook
         run: |
-          jupyter nbconvert --to notebook --execute BT4014_Plotting.ipynb --inplace
+          jupyter nbconvert \
+            --to notebook \
+            --execute BT4014_Plotting.ipynb \
+            --inplace \
+            --ExecutePreprocessor.kernel_name=python3
       - name: Commit and Push Results
         run: |
           git config user.name "github-actions[bot]"

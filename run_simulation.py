@@ -31,7 +31,6 @@ article_embedding_dict = {nid: emb for nid, emb in zip(news_articles["News_ID"],
 # ==========================================
 print("Feature engineering...")
 
-# 2.1 History Count
 def get_history_count(history):
     if pd.isna(history) or history == "": return 0
     return len(history.split())
@@ -39,7 +38,6 @@ def get_history_count(history):
 users_interaction['history_count'] = users_interaction['History'].apply(get_history_count)
 users_interaction['history_count_norm'] = users_interaction['history_count'] / users_interaction['history_count'].max()
 
-# 2.2 Category Frequencies
 news_to_category = dict(zip(news_articles['News_ID'], news_articles['Category']))
 all_categories = news_articles['Category'].unique().tolist()
 
@@ -56,12 +54,10 @@ def get_category_freq(history):
 
 users_interaction['category_freq'] = users_interaction['History'].apply(get_category_freq)
 
-# 2.3 Time Features
 users_interaction['Time_Stamp'] = pd.to_datetime(users_interaction['Time_Stamp'])
 users_interaction['hour_norm'] = users_interaction['Time_Stamp'].dt.hour / 23.0
 users_interaction['day_norm'] = users_interaction['Time_Stamp'].dt.dayofweek / 6.0
 
-# 2.4 Mean User Embeddings
 def get_user_vector(history):
     vecs = [article_embedding_dict[a] for a in history.split() if a in article_embedding_dict]
     if len(vecs) == 0: return np.zeros(EMB_DIM)
@@ -74,20 +70,17 @@ users_interaction['user_vector'] = users_interaction['History'].fillna('').apply
 # ==========================================
 print("Running PCA & Vectorizing User Features...")
 
-# PCA on articles
 article_ids = list(article_embedding_dict.keys())
 X_articles = np.array([article_embedding_dict[aid] for aid in article_ids])
 pca = PCA(n_components=64, random_state=42)
 X_articles_64 = pca.fit_transform(X_articles)
 article_embedding_dict_64 = {aid: X_articles_64[i] for i, aid in enumerate(article_ids)}
 
-# Vectorized User Feature Construction
 X_users_pca = pca.transform(np.vstack(users_interaction["user_vector"].values))
 time_feats = users_interaction[["hour_norm", "day_norm"]].values
 hist_feat = users_interaction[["history_count_norm"]].values
 cat_feats = np.vstack(users_interaction["category_freq"].values)
 
-# Final combined matrix
 user_features_matrix = np.hstack([X_users_pca, time_feats, hist_feat, cat_feats]).astype(np.float32)
 users_interaction["user_features"] = list(user_features_matrix)
 
@@ -114,7 +107,6 @@ def make_context(user_features, article_emb):
 # ==========================================
 # 5. BANDIT ALGORITHMS (SHARED SPACE)
 # ==========================================
-
 class SharedEpsilonGreedy:
     def __init__(self, d, epsilon=0.1, lr=0.01):
         self.name = "Epsilon Greedy"
@@ -209,32 +201,41 @@ class SharedTS:
 # 6. SIMULATION ENGINE
 # ==========================================
 def test_algo(algo, df, emb_dict):
-    cumulative_reward, t_valid = 0, 0
+    cumulative_reward = 0
     results = []
     total_rows = len(df)
     start_time = time.time()
     last_print_time = start_time
 
     print(f"\nEvaluating: {algo.name}")
-    print(f"{'Step':>10} | {'Progress':>8} | {'Accepted':>10} | {'CTR':>8} | {'Match%':>8} | {'Speed':>10}")
-    print("-" * 80)
+    print(f"{'Step':>10} | {'Progress':>8} | {'Cum Reward':>10} | {'CTR':>8} | {'Speed':>10}")
+    print("-" * 75)
 
     for i, row in enumerate(df.itertuples(), start=1):
         chosen = algo.select_arm(row.user_features, row.candidate_ids, emb_dict)
 
-        # Replay Match Logic
-        if chosen == row.clicked_id:
-            reward = 1
-            algo.update(reward)
-            cumulative_reward += reward
-            t_valid += 1
-            results.append({"Timestep": t_valid, "Reward": reward, "Cumulative_Reward": cumulative_reward})
+        if chosen is None:
+            continue
+
+        # Reward is 1 if it matched the click, 0 if it picked another candidate
+        reward = 1 if chosen == row.clicked_id else 0
+        
+        algo.update(reward)
+        cumulative_reward += reward
+
+        # Back to the old format: No "Algorithm" column generated here
+        results.append({
+            "Timestep": i, 
+            "Reward": reward, 
+            "Cumulative_Reward": cumulative_reward
+        })
 
         if i % 1000 == 0 or i == total_rows:
             curr = time.time()
             elapsed = curr - start_time
             speed = 1000 / (curr - last_print_time) if i > 1000 else i/elapsed
-            print(f"{i:10d} | {(i/total_rows)*100:7.1f}% | {t_valid:10d} | {cumulative_reward/max(t_valid,1):8.4f} | {(t_valid/i)*100:7.2f}% | {speed:7.1f} s/s")
+            ctr = cumulative_reward / i
+            print(f"{i:10d} | {(i/total_rows)*100:7.1f}% | {cumulative_reward:10d} | {ctr:8.4f} | {speed:7.1f} s/s")
             last_print_time = curr
 
     return pd.DataFrame(results)
@@ -247,7 +248,7 @@ if __name__ == "__main__":
     parser.add_argument("algo", choices=["eps", "linucb", "ts"])
     args = parser.parse_args()
     simulations = 10
-    # Fixed subset for simulation
+    
     df_eval = users_interaction.sample(frac=1, random_state=42).reset_index(drop=True)
     context_dim = len(df_eval.iloc[0]["user_features"]) + 64
 
@@ -255,18 +256,19 @@ if __name__ == "__main__":
         all_runs = []
         for sim in range(simulations):
             res = test_algo(SharedEpsilonGreedy(context_dim), df_eval, article_embedding_dict_64)
-            res["run"] = sim
+            res["Simulation"] = sim
             all_runs.append(res)
         results = pd.concat(all_runs)
     
     elif args.algo == "linucb":
         results = test_algo(SharedLinUCB(context_dim), df_eval, article_embedding_dict_64)
+        results["Simulation"] = 0 
     
     elif args.algo == "ts":
         all_runs = []
         for sim in range(simulations):
             res = test_algo(SharedTS(context_dim), df_eval, article_embedding_dict_64)
-            res["run"] = sim
+            res["Simulation"] = sim
             all_runs.append(res)
         results = pd.concat(all_runs)
 
