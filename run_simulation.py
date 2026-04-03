@@ -105,15 +105,22 @@ def make_context(user_features, article_emb):
     return np.concatenate([user_features, article_emb])
 
 # ==========================================
-# 5. BANDIT ALGORITHMS (SHARED SPACE)
+# 5. BANDIT ALGORITHMS (DISJOINT)
 # ==========================================
-class SharedEpsilonGreedy:
+
+class DisjointEpsilonGreedy:
     def __init__(self, d, epsilon=0.1, lr=0.01):
-        self.name = "Epsilon Greedy"
-        self.theta = np.zeros(d)
+        self.name = "Disjoint Epsilon Greedy"
+        self.d = d
         self.epsilon = epsilon
         self.lr = lr
+        self.theta = {}
         self.last_context = None
+        self.last_arm = None
+
+    def _init_arm(self, aid):
+        if aid not in self.theta:
+            self.theta[aid] = np.zeros(self.d)
 
     def select_arm(self, user_features, candidates, emb_dict):
         valid = [aid for aid in candidates if aid in emb_dict]
@@ -121,81 +128,119 @@ class SharedEpsilonGreedy:
         
         if np.random.rand() < self.epsilon:
             chosen = np.random.choice(valid)
+            self._init_arm(chosen)
             self.last_context = make_context(user_features, emb_dict[chosen])
+            self.last_arm = chosen
             return chosen
 
         scores = []
         contexts = []
         for aid in valid:
+            self._init_arm(aid)
             x = make_context(user_features, emb_dict[aid])
-            scores.append(x @ self.theta)
+            scores.append(x @ self.theta[aid])
             contexts.append(x)
         
         idx = np.argmax(scores)
         self.last_context = contexts[idx]
+        self.last_arm = valid[idx]
         return valid[idx]
 
     def update(self, reward):
-        if self.last_context is not None:
-            error = reward - (self.last_context @ self.theta)
-            self.theta += self.lr * error * self.last_context
+        if self.last_context is None or self.last_arm is None: return
+        aid = self.last_arm
+        error = reward - (self.last_context @ self.theta[aid])
+        self.theta[aid] += self.lr * error * self.last_context
 
-class SharedLinUCB:
+class DisjointLinUCB:
     def __init__(self, d, alpha=1.0):
-        self.name = "LinUCB"
+        self.name = "Disjoint LinUCB"
         self.alpha = alpha
-        self.A_inv = np.eye(d)
-        self.b = np.zeros(d)
-        self.theta = np.zeros(d)
+        self.d = d
+        self.A_inv = {}
+        self.b = {}
+        self.theta = {}
         self.last_context = None
+        self.last_arm = None
+
+    def _init_arm(self, aid):
+        if aid not in self.A_inv:
+            self.A_inv[aid] = np.eye(self.d)
+            self.b[aid] = np.zeros(self.d)
+            self.theta[aid] = np.zeros(self.d)
 
     def select_arm(self, user_features, candidates, emb_dict):
         best_score, best_arm, best_context = -np.inf, None, None
+        
         for aid in candidates:
             if aid not in emb_dict: continue
+            
+            self._init_arm(aid)
             x = make_context(user_features, emb_dict[aid])
-            score = x @ self.theta + self.alpha * np.sqrt(x @ self.A_inv @ x)
+            score = x @ self.theta[aid] + self.alpha * np.sqrt(x @ self.A_inv[aid] @ x)
+            
             if score > best_score:
                 best_score, best_arm, best_context = score, aid, x
+                
         self.last_context = best_context
+        self.last_arm = best_arm
         return best_arm
 
     def update(self, reward):
-        if self.last_context is None: return
+        if self.last_context is None or self.last_arm is None: return
+        
         x = self.last_context
-        Ax = self.A_inv @ x
-        self.A_inv -= np.outer(Ax, Ax) / (1 + x @ Ax)
-        self.b += reward * x
-        self.theta = self.A_inv @ self.b
+        aid = self.last_arm
+        Ax = self.A_inv[aid] @ x
+        self.A_inv[aid] -= np.outer(Ax, Ax) / (1 + x @ Ax)
+        self.b[aid] += reward * x
+        self.theta[aid] = self.A_inv[aid] @ self.b[aid]
 
-class SharedTS:
+
+class DisjointTS:
     def __init__(self, d, v=0.3):
-        self.name = "Thompson Sampling"
-        self.A_inv = np.eye(d)
-        self.b = np.zeros(d)
-        self.mu = np.zeros(d)
+        self.name = "Disjoint Thompson Sampling"
         self.v = v
+        self.d = d
+        self.A_inv = {}
+        self.b = {}
+        self.mu = {}
         self.last_context = None
+        self.last_arm = None
+        
+    def _init_arm(self, aid):
+        if aid not in self.A_inv:
+            self.A_inv[aid] = np.eye(self.d)
+            self.b[aid] = np.zeros(self.d)
+            self.mu[aid] = np.zeros(self.d)
 
     def select_arm(self, user_features, candidates, emb_dict):
         best_score, best_arm, best_context = -np.inf, None, None
+        
         for aid in candidates:
             if aid not in emb_dict: continue
+            
+            self._init_arm(aid)
             x = make_context(user_features, emb_dict[aid])
-            var = max((self.v ** 2) * (x @ self.A_inv @ x), 1e-6)
-            score = np.random.normal(x @ self.mu, np.sqrt(var))
+            var = max((self.v ** 2) * (x @ self.A_inv[aid] @ x), 1e-6)
+            score = np.random.normal(x @ self.mu[aid], np.sqrt(var))
+            
             if score > best_score:
                 best_score, best_arm, best_context = score, aid, x
+                
         self.last_context = best_context
+        self.last_arm = best_arm
         return best_arm
 
     def update(self, reward):
-        if self.last_context is None: return
+        if self.last_context is None or self.last_arm is None: return
+        
         x = self.last_context
-        Ax = self.A_inv @ x
-        self.A_inv -= np.outer(Ax, Ax) / (1 + x @ Ax)
-        self.b += reward * x
-        self.mu = self.A_inv @ self.b
+        aid = self.last_arm
+        Ax = self.A_inv[aid] @ x
+        self.A_inv[aid] -= np.outer(Ax, Ax) / (1 + x @ Ax)
+        self.b[aid] += reward * x
+        self.mu[aid] = self.A_inv[aid] @ self.b[aid]
 
 # ==========================================
 # 6. SIMULATION ENGINE
@@ -223,7 +268,6 @@ def test_algo(algo, df, emb_dict):
         algo.update(reward)
         cumulative_reward += reward
 
-        # Back to the old format: No "Algorithm" column generated here
         results.append({
             "Timestep": i, 
             "Reward": reward, 
@@ -255,19 +299,19 @@ if __name__ == "__main__":
     if args.algo == "eps":
         all_runs = []
         for sim in range(simulations):
-            res = test_algo(SharedEpsilonGreedy(context_dim), df_eval, article_embedding_dict_64)
+            res = test_algo(DisjointEpsilonGreedy(context_dim), df_eval, article_embedding_dict_64)
             res["Simulation"] = sim
             all_runs.append(res)
         results = pd.concat(all_runs)
     
     elif args.algo == "linucb":
-        results = test_algo(SharedLinUCB(context_dim), df_eval, article_embedding_dict_64)
+        results = test_algo(DisjointLinUCB(context_dim), df_eval, article_embedding_dict_64)
         results["Simulation"] = 0 
     
     elif args.algo == "ts":
         all_runs = []
         for sim in range(simulations):
-            res = test_algo(SharedTS(context_dim), df_eval, article_embedding_dict_64)
+            res = test_algo(DisjointTS(context_dim), df_eval, article_embedding_dict_64)
             res["Simulation"] = sim
             all_runs.append(res)
         results = pd.concat(all_runs)
