@@ -1,1 +1,25 @@
 article_embeddings.npy
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# IDE files
+.vscode/
+.idea/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# Logs and data
+*.log
+*.csv
+*.pkl
+
+# OS metadata
+.DS_Store
+Thumbs.db
