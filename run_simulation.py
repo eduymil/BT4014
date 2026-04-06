@@ -26,8 +26,12 @@ EMB_DIM = article_embeddings.shape[1]
 
 article_embedding_dict = {nid: emb for nid, emb in zip(news_articles["News_ID"], article_embeddings)}
 
+# Dictionary mapping Article ID to its Category (Crucial for Non-Contextual)
+news_to_category = dict(zip(news_articles['News_ID'], news_articles['Category']))
+all_categories = news_articles['Category'].unique().tolist()
+
 # ==========================================
-# 2. FEATURE ENGINEERING (OPTIMIZED)
+# 2. FEATURE ENGINEERING
 # ==========================================
 print("Feature engineering...")
 
@@ -37,9 +41,6 @@ def get_history_count(history):
 
 users_interaction['history_count'] = users_interaction['History'].apply(get_history_count)
 users_interaction['history_count_norm'] = users_interaction['history_count'] / users_interaction['history_count'].max()
-
-news_to_category = dict(zip(news_articles['News_ID'], news_articles['Category']))
-all_categories = news_articles['Category'].unique().tolist()
 
 def get_category_freq(history):
     freq = defaultdict(int)
@@ -105,9 +106,228 @@ def make_context(user_features, article_emb):
     return np.concatenate([user_features, article_emb])
 
 # ==========================================
-# 5. BANDIT ALGORITHMS (DISJOINT)
+# 5A. NON-CONTEXTUAL ALGORITHMS (Category Tracking)
 # ==========================================
+class BaseCategoryBandit:
+    def __init__(self, name):
+        self.name = name
+        self.counts = defaultdict(int)
+        self.values = defaultdict(float)
+        self.last_cat = None
 
+    def update(self, reward):
+        if self.last_cat is None: return
+        self.counts[self.last_cat] += 1
+        n = self.counts[self.last_cat]
+        val = self.values[self.last_cat]
+        self.values[self.last_cat] = ((n - 1) / n) * val + (1 / n) * reward
+
+class EpsilonGreedy:
+    def __init__(self, epsilon=0.1):
+        self.base = BaseCategoryBandit("Epsilon Greedy (Category)")
+        self.epsilon = epsilon
+
+    def select_arm(self, candidates, news_to_cat, **kwargs):
+        if np.random.rand() < self.epsilon:
+            chosen = np.random.choice(candidates)
+        else:
+            best_score = -np.inf
+            chosen = candidates[0]
+            for aid in candidates:
+                cat = news_to_cat.get(aid, "Unknown")
+                if self.base.values[cat] > best_score:
+                    best_score = self.base.values[cat]
+                    chosen = aid
+        self.base.last_cat = news_to_cat.get(chosen, "Unknown")
+        return chosen
+
+    def update(self, reward): self.base.update(reward)
+
+class DecayingEpsilon:
+    def __init__(self):
+        self.base = BaseCategoryBandit("Decaying Epsilon (Category)")
+        self.t = 1
+
+    def select_arm(self, candidates, news_to_cat, **kwargs):
+        epsilon = 1.0 / np.sqrt(self.t)
+        if np.random.rand() < epsilon:
+            chosen = np.random.choice(candidates)
+        else:
+            best_score = -np.inf
+            chosen = candidates[0]
+            for aid in candidates:
+                cat = news_to_cat.get(aid, "Unknown")
+                if self.base.values[cat] > best_score:
+                    best_score = self.base.values[cat]
+                    chosen = aid
+        self.base.last_cat = news_to_cat.get(chosen, "Unknown")
+        self.t += 1
+        return chosen
+
+    def update(self, reward): self.base.update(reward)
+
+class Softmax:
+    def __init__(self, tau=0.1):
+        self.base = BaseCategoryBandit("Softmax (Category)")
+        self.tau = tau
+
+    def select_arm(self, candidates, news_to_cat, **kwargs):
+        vals = np.array([self.base.values[news_to_cat.get(aid, "Unknown")] for aid in candidates])
+        z = vals / self.tau
+        exp_z = np.exp(z - np.max(z))
+        probs = exp_z / np.sum(exp_z)
+        chosen = np.random.choice(candidates, p=probs)
+        self.base.last_cat = news_to_cat.get(chosen, "Unknown")
+        return chosen
+
+    def update(self, reward): self.base.update(reward)
+
+class UCB1:
+    def __init__(self):
+        self.base = BaseCategoryBandit("UCB1 (Category)")
+        self.total_pulls = 0
+
+    def select_arm(self, candidates, news_to_cat, **kwargs):
+        best_score = -np.inf
+        chosen = None
+        for aid in candidates:
+            cat = news_to_cat.get(aid, "Unknown")
+            if self.base.counts[cat] == 0:
+                score = np.inf
+            else:
+                score = self.base.values[cat] + np.sqrt(2 * np.log(self.total_pulls) / self.base.counts[cat])
+            
+            if score > best_score:
+                best_score = score
+                chosen = aid
+                
+        self.base.last_cat = news_to_cat.get(chosen, "Unknown")
+        return chosen
+
+    def update(self, reward):
+        self.total_pulls += 1
+        self.base.update(reward)
+
+class ThompsonSampling:
+    def __init__(self):
+        self.name = "Thompson Sampling (Category)"
+        self.successes = defaultdict(lambda: 1) 
+        self.failures = defaultdict(lambda: 1)  
+        self.last_cat = None
+
+    def select_arm(self, candidates, news_to_cat, **kwargs):
+        best_score = -np.inf
+        chosen = None
+        for aid in candidates:
+            cat = news_to_cat.get(aid, "Unknown")
+            score = np.random.beta(self.successes[cat], self.failures[cat])
+            if score > best_score:
+                best_score = score
+                chosen = aid
+                
+        self.last_cat = news_to_cat.get(chosen, "Unknown")
+        return chosen
+
+    def update(self, reward):
+        if self.last_cat is None: return
+        if reward == 1:
+            self.successes[self.last_cat] += 1
+        else:
+            self.failures[self.last_cat] += 1
+
+# ==========================================
+# 5B. SHARED CONTEXTUAL ALGORITHMS
+# ==========================================
+class SharedEpsilonGreedy:
+    def __init__(self, d, epsilon=0.1, lr=0.01):
+        self.name = "Shared Epsilon Greedy"
+        self.theta = np.zeros(d)
+        self.epsilon = epsilon
+        self.lr = lr
+        self.last_context = None
+
+    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
+        valid = [aid for aid in candidates if aid in emb_dict]
+        if not valid: return None
+        if np.random.rand() < self.epsilon:
+            chosen = np.random.choice(valid)
+            self.last_context = make_context(user_features, emb_dict[chosen])
+            return chosen
+
+        scores, contexts = [], []
+        for aid in valid:
+            x = make_context(user_features, emb_dict[aid])
+            scores.append(x @ self.theta)
+            contexts.append(x)
+        idx = np.argmax(scores)
+        self.last_context = contexts[idx]
+        return valid[idx]
+
+    def update(self, reward):
+        if self.last_context is not None:
+            error = reward - (self.last_context @ self.theta)
+            self.theta += self.lr * error * self.last_context
+
+class SharedLinUCB:
+    def __init__(self, d, alpha=1.0):
+        self.name = "Shared LinUCB"
+        self.alpha = alpha
+        self.A_inv = np.eye(d)
+        self.b = np.zeros(d)
+        self.theta = np.zeros(d)
+        self.last_context = None
+
+    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
+        best_score, best_arm, best_context = -np.inf, None, None
+        for aid in candidates:
+            if aid not in emb_dict: continue
+            x = make_context(user_features, emb_dict[aid])
+            score = x @ self.theta + self.alpha * np.sqrt(x @ self.A_inv @ x)
+            if score > best_score:
+                best_score, best_arm, best_context = score, aid, x
+        self.last_context = best_context
+        return best_arm
+
+    def update(self, reward):
+        if self.last_context is None: return
+        x = self.last_context
+        Ax = self.A_inv @ x
+        self.A_inv -= np.outer(Ax, Ax) / (1 + x @ Ax)
+        self.b += reward * x
+        self.theta = self.A_inv @ self.b
+
+class SharedTS:
+    def __init__(self, d, v=0.3):
+        self.name = "Shared Thompson Sampling"
+        self.A_inv = np.eye(d)
+        self.b = np.zeros(d)
+        self.mu = np.zeros(d)
+        self.v = v
+        self.last_context = None
+
+    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
+        best_score, best_arm, best_context = -np.inf, None, None
+        for aid in candidates:
+            if aid not in emb_dict: continue
+            x = make_context(user_features, emb_dict[aid])
+            var = max((self.v ** 2) * (x @ self.A_inv @ x), 1e-6)
+            score = np.random.normal(x @ self.mu, np.sqrt(var))
+            if score > best_score:
+                best_score, best_arm, best_context = score, aid, x
+        self.last_context = best_context
+        return best_arm
+
+    def update(self, reward):
+        if self.last_context is None: return
+        x = self.last_context
+        Ax = self.A_inv @ x
+        self.A_inv -= np.outer(Ax, Ax) / (1 + x @ Ax)
+        self.b += reward * x
+        self.mu = self.A_inv @ self.b
+
+# ==========================================
+# 5C. DISJOINT CONTEXTUAL ALGORITHMS
+# ==========================================
 class DisjointEpsilonGreedy:
     def __init__(self, d, epsilon=0.1, lr=0.01):
         self.name = "Disjoint Epsilon Greedy"
@@ -122,10 +342,9 @@ class DisjointEpsilonGreedy:
         if aid not in self.theta:
             self.theta[aid] = np.zeros(self.d)
 
-    def select_arm(self, user_features, candidates, emb_dict):
+    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
         valid = [aid for aid in candidates if aid in emb_dict]
         if not valid: return None
-        
         if np.random.rand() < self.epsilon:
             chosen = np.random.choice(valid)
             self._init_arm(chosen)
@@ -133,14 +352,12 @@ class DisjointEpsilonGreedy:
             self.last_arm = chosen
             return chosen
 
-        scores = []
-        contexts = []
+        scores, contexts = [], []
         for aid in valid:
             self._init_arm(aid)
             x = make_context(user_features, emb_dict[aid])
             scores.append(x @ self.theta[aid])
             contexts.append(x)
-        
         idx = np.argmax(scores)
         self.last_context = contexts[idx]
         self.last_arm = valid[idx]
@@ -169,33 +386,27 @@ class DisjointLinUCB:
             self.b[aid] = np.zeros(self.d)
             self.theta[aid] = np.zeros(self.d)
 
-    def select_arm(self, user_features, candidates, emb_dict):
+    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
         best_score, best_arm, best_context = -np.inf, None, None
-        
         for aid in candidates:
             if aid not in emb_dict: continue
-            
             self._init_arm(aid)
             x = make_context(user_features, emb_dict[aid])
             score = x @ self.theta[aid] + self.alpha * np.sqrt(x @ self.A_inv[aid] @ x)
-            
             if score > best_score:
                 best_score, best_arm, best_context = score, aid, x
-                
         self.last_context = best_context
         self.last_arm = best_arm
         return best_arm
 
     def update(self, reward):
         if self.last_context is None or self.last_arm is None: return
-        
         x = self.last_context
         aid = self.last_arm
         Ax = self.A_inv[aid] @ x
         self.A_inv[aid] -= np.outer(Ax, Ax) / (1 + x @ Ax)
         self.b[aid] += reward * x
         self.theta[aid] = self.A_inv[aid] @ self.b[aid]
-
 
 class DisjointTS:
     def __init__(self, d, v=0.3):
@@ -214,27 +425,22 @@ class DisjointTS:
             self.b[aid] = np.zeros(self.d)
             self.mu[aid] = np.zeros(self.d)
 
-    def select_arm(self, user_features, candidates, emb_dict):
+    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
         best_score, best_arm, best_context = -np.inf, None, None
-        
         for aid in candidates:
             if aid not in emb_dict: continue
-            
             self._init_arm(aid)
             x = make_context(user_features, emb_dict[aid])
             var = max((self.v ** 2) * (x @ self.A_inv[aid] @ x), 1e-6)
             score = np.random.normal(x @ self.mu[aid], np.sqrt(var))
-            
             if score > best_score:
                 best_score, best_arm, best_context = score, aid, x
-                
         self.last_context = best_context
         self.last_arm = best_arm
         return best_arm
 
     def update(self, reward):
         if self.last_context is None or self.last_arm is None: return
-        
         x = self.last_context
         aid = self.last_arm
         Ax = self.A_inv[aid] @ x
@@ -245,7 +451,7 @@ class DisjointTS:
 # ==========================================
 # 6. SIMULATION ENGINE
 # ==========================================
-def test_algo(algo, df, emb_dict):
+def test_algo(algo, df, emb_dict, news_to_cat):
     cumulative_reward = 0
     results = []
     total_rows = len(df)
@@ -257,14 +463,17 @@ def test_algo(algo, df, emb_dict):
     print("-" * 75)
 
     for i, row in enumerate(df.itertuples(), start=1):
-        chosen = algo.select_arm(row.user_features, row.candidate_ids, emb_dict)
+        chosen = algo.select_arm(
+            user_features=row.user_features, 
+            candidates=row.candidate_ids, 
+            emb_dict=emb_dict,
+            news_to_cat=news_to_cat
+        )
 
         if chosen is None:
             continue
 
-        # Reward is 1 if it matched the click, 0 if it picked another candidate
         reward = 1 if chosen == row.clicked_id else 0
-        
         algo.update(reward)
         cumulative_reward += reward
 
@@ -289,29 +498,44 @@ def test_algo(algo, df, emb_dict):
 # ==========================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("algo", choices=["eps", "linucb", "ts"])
+    
+    # 11 Total Algorithms
+    parser.add_argument("algo", choices=[
+        "eps", "decay_eps", "softmax", "ucb1", "ts",           # Non-Contextual
+        "shared_eps", "shared_linucb", "shared_ts",            # Shared Contextual
+        "disjoint_eps", "disjoint_linucb", "disjoint_ts"       # Disjoint Contextual
+    ])
     args = parser.parse_args()
     simulations = 10
     
     df_eval = users_interaction.sample(frac=1, random_state=42).reset_index(drop=True)
     context_dim = len(df_eval.iloc[0]["user_features"]) + 64
 
-    if args.algo == "eps":
-        all_runs = []
-        for sim in range(simulations):
-            res = test_algo(DisjointEpsilonGreedy(context_dim), df_eval, article_embedding_dict_64)
-            res["Simulation"] = sim
-            all_runs.append(res)
-        results = pd.concat(all_runs)
-    
-    elif args.algo == "linucb":
-        results = test_algo(DisjointLinUCB(context_dim), df_eval, article_embedding_dict_64)
+    # Map string arguments to instances
+    algo_map = {
+        "eps": lambda: EpsilonGreedy(),
+        "decay_eps": lambda: DecayingEpsilon(),
+        "softmax": lambda: Softmax(),
+        "ucb1": lambda: UCB1(),
+        "ts": lambda: ThompsonSampling(),
+        "shared_eps": lambda: SharedEpsilonGreedy(context_dim),
+        "shared_linucb": lambda: SharedLinUCB(context_dim),
+        "shared_ts": lambda: SharedTS(context_dim),
+        "disjoint_eps": lambda: DisjointEpsilonGreedy(context_dim),
+        "disjoint_linucb": lambda: DisjointLinUCB(context_dim),
+        "disjoint_ts": lambda: DisjointTS(context_dim)
+    }
+
+    AlgoFactory = algo_map[args.algo]
+
+    # Deterministic algorithms don't need multiple simulations
+    if args.algo in ["ucb1", "shared_linucb", "disjoint_linucb"]:
+        results = test_algo(AlgoFactory(), df_eval, article_embedding_dict_64, news_to_category)
         results["Simulation"] = 0 
-    
-    elif args.algo == "ts":
+    else:
         all_runs = []
         for sim in range(simulations):
-            res = test_algo(DisjointTS(context_dim), df_eval, article_embedding_dict_64)
+            res = test_algo(AlgoFactory(), df_eval, article_embedding_dict_64, news_to_category)
             res["Simulation"] = sim
             all_runs.append(res)
         results = pd.concat(all_runs)
