@@ -125,6 +125,7 @@ class BaseCategoryBandit:
 class EpsilonGreedy:
     def __init__(self, epsilon=0.1):
         self.base = BaseCategoryBandit("Epsilon Greedy (Category)")
+        self.name = self.base.name
         self.epsilon = epsilon
 
     def select_arm(self, candidates, news_to_cat, **kwargs):
@@ -146,6 +147,7 @@ class EpsilonGreedy:
 class DecayingEpsilon:
     def __init__(self):
         self.base = BaseCategoryBandit("Decaying Epsilon (Category)")
+        self.name = self.base.name
         self.t = 1
 
     def select_arm(self, candidates, news_to_cat, **kwargs):
@@ -169,6 +171,7 @@ class DecayingEpsilon:
 class Softmax:
     def __init__(self, tau=0.1):
         self.base = BaseCategoryBandit("Softmax (Category)")
+        self.name = self.base.name
         self.tau = tau
 
     def select_arm(self, candidates, news_to_cat, **kwargs):
@@ -185,6 +188,7 @@ class Softmax:
 class UCB1:
     def __init__(self):
         self.base = BaseCategoryBandit("UCB1 (Category)")
+        self.name = self.base.name
         self.total_pulls = 0
 
     def select_arm(self, candidates, news_to_cat, **kwargs):
