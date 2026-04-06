@@ -71,9 +71,10 @@ users_interaction['user_vector'] = users_interaction['History'].fillna('').apply
 # ==========================================
 print("Running PCA & Vectorizing User Features...")
 
+# Using base seed 4014 for PCA
 article_ids = list(article_embedding_dict.keys())
 X_articles = np.array([article_embedding_dict[aid] for aid in article_ids])
-pca = PCA(n_components=64, random_state=42)
+pca = PCA(n_components=64, random_state=4014)
 X_articles_64 = pca.fit_transform(X_articles)
 article_embedding_dict_64 = {aid: X_articles_64[i] for i, aid in enumerate(article_ids)}
 
@@ -511,8 +512,10 @@ if __name__ == "__main__":
     ])
     args = parser.parse_args()
     simulations = 10
+    base_seed = 4014
     
-    df_eval = users_interaction.sample(frac=1, random_state=42).reset_index(drop=True)
+    # Using base seed 4014 for dataframe shuffling
+    df_eval = users_interaction.sample(frac=1, random_state=base_seed).reset_index(drop=True)
     context_dim = len(df_eval.iloc[0]["user_features"]) + 64
 
     # Map string arguments to instances
@@ -534,11 +537,14 @@ if __name__ == "__main__":
 
     # Deterministic algorithms don't need multiple simulations
     if args.algo in ["ucb1", "shared_linucb", "disjoint_linucb"]:
+        np.random.seed(base_seed)
         results = test_algo(AlgoFactory(), df_eval, article_embedding_dict_64, news_to_category)
         results["Simulation"] = 0 
     else:
         all_runs = []
         for sim in range(simulations):
+            current_seed = base_seed + sim
+            np.random.seed(current_seed)
             res = test_algo(AlgoFactory(), df_eval, article_embedding_dict_64, news_to_category)
             res["Simulation"] = sim
             all_runs.append(res)
