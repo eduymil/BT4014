@@ -12,23 +12,36 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # Runs all 11 algorithms in parallel
-        algorithm: [
-          eps, decay_eps, softmax, ucb1, ts, 
-          shared_eps, shared_linucb, shared_ts, 
-          disjoint_eps, disjoint_linucb, disjoint_ts
-        ]
+        # Runs all 12 algorithms in parallel
+        algorithm:
+          [
+            eps,
+            decay_eps,
+            softmax,
+            ucb1,
+            bayes_ucb,
+            ts,
+            shared_eps,
+            shared_linucb,
+            shared_ts,
+            disjoint_eps,
+            disjoint_linucb,
+            disjoint_ts
+          ]
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install scikit-learn pandas numpy
+        run: pip install -r requirements.txt
+
       - name: Run Simulation
         run: python run_simulation.py ${{ matrix.algorithm }}
+
       - uses: actions/upload-artifact@v4
         with:
           name: results-${{ matrix.algorithm }}
