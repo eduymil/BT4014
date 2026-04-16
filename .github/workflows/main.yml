@@ -12,7 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # Runs all 12 algorithms in parallel
         algorithm:
           [
             eps,
@@ -39,10 +38,38 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Create results folder
+        run: mkdir -p results
+
       - name: Run Simulation
         run: python run_simulation.py ${{ matrix.algorithm }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Move result into folder
+        run: mv results_${{ matrix.algorithm }}.csv results/
+
+      - name: Upload result artifact
+        uses: actions/upload-artifact@v4
         with:
           name: results-${{ matrix.algorithm }}
-          path: results_${{ matrix.algorithm }}.csv
+          path: results/results_${{ matrix.algorithm }}.csv
+
+  collect-results:
+    needs: run-simulations
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all result artifacts into one folder
+        uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: combined-results
+          merge-multiple: true
+
+      - name: Show downloaded files
+        run: ls -R combined-results
+
+      - name: Upload one combined artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-results
+          path: combined-results/

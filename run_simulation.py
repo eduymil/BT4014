@@ -32,7 +32,6 @@ article_embedding_dict = {
     nid: emb for nid, emb in zip(news_articles["News_ID"], article_embeddings)
 }
 
-# Dictionary mapping Article ID to its Category
 news_to_category = dict(zip(news_articles["News_ID"], news_articles["Category"]))
 all_categories = news_articles["Category"].unique().tolist()
 
@@ -54,7 +53,7 @@ users_interaction["history_count_norm"] = (
 def get_category_freq(history):
     freq = defaultdict(int)
     if pd.isna(history) or history == "":
-        return np.zeros(len(all_categories))
+        return np.zeros(len(all_categories), dtype=float)
 
     articles = history.split()
     for article in articles:
@@ -75,11 +74,11 @@ users_interaction["day_norm"] = users_interaction["Time_Stamp"].dt.dayofweek / 6
 
 def get_user_vector(history):
     if pd.isna(history) or history == "":
-        return np.zeros(EMB_DIM)
+        return np.zeros(EMB_DIM, dtype=float)
 
     vecs = [article_embedding_dict[a] for a in history.split() if a in article_embedding_dict]
     if len(vecs) == 0:
-        return np.zeros(EMB_DIM)
+        return np.zeros(EMB_DIM, dtype=float)
     return np.mean(vecs, axis=0)
 
 users_interaction["user_vector"] = users_interaction["History"].fillna("").apply(get_user_vector)
@@ -94,14 +93,17 @@ X_articles = np.array([article_embedding_dict[aid] for aid in article_ids])
 
 pca = PCA(n_components=64, random_state=4014)
 X_articles_64 = pca.fit_transform(X_articles)
+
 article_embedding_dict_64 = {
-    aid: X_articles_64[i] for i, aid in enumerate(article_ids)
+    aid: X_articles_64[i].astype(np.float32) for i, aid in enumerate(article_ids)
 }
 
-X_users_pca = pca.transform(np.vstack(users_interaction["user_vector"].values))
-time_feats = users_interaction[["hour_norm", "day_norm"]].values
-hist_feat = users_interaction[["history_count_norm"]].values
-cat_feats = np.vstack(users_interaction["category_freq"].values)
+X_users_pca = pca.transform(np.vstack(users_interaction["user_vector"].values)).astype(np.float32)
+users_interaction["user_emb_64"] = list(X_users_pca)
+
+time_feats = users_interaction[["hour_norm", "day_norm"]].values.astype(np.float32)
+hist_feat = users_interaction[["history_count_norm"]].values.astype(np.float32)
+cat_feats = np.vstack(users_interaction["category_freq"].values).astype(np.float32)
 
 user_features_matrix = np.hstack([X_users_pca, time_feats, hist_feat, cat_feats]).astype(np.float32)
 users_interaction["user_features"] = list(user_features_matrix)
@@ -130,8 +132,16 @@ users_interaction[["candidate_ids", "clicked_id"]] = users_interaction["Impressi
     lambda x: pd.Series(parse_impressions(x))
 )
 
-def make_context(user_features, article_emb):
-    return np.concatenate([user_features, article_emb])
+def cosine_similarity(a, b):
+    a_norm = np.linalg.norm(a)
+    b_norm = np.linalg.norm(b)
+    if a_norm == 0 or b_norm == 0:
+        return 0.0
+    return float(np.dot(a, b) / (a_norm * b_norm))
+
+def make_context(user_features, article_emb, user_emb_64):
+    sim = cosine_similarity(user_emb_64, article_emb)
+    return np.concatenate([user_features, article_emb, np.array([sim], dtype=np.float32)]).astype(np.float32)
 
 # ==========================================
 # 5A. NON-CONTEXTUAL ALGORITHMS (Article-Level)
@@ -219,7 +229,7 @@ class Softmax:
         if not candidates:
             return None
 
-        vals = np.array([self.base.values[aid] for aid in candidates])
+        vals = np.array([self.base.values[aid] for aid in candidates], dtype=float)
         z = vals / self.tau
         exp_z = np.exp(z - np.max(z))
         probs = exp_z / np.sum(exp_z)
@@ -250,7 +260,7 @@ class UCB1:
                 score = np.inf
             else:
                 score = self.base.values[aid] + np.sqrt(
-                    2 * np.log(self.total_pulls) / self.base.counts[aid]
+                    2 * np.log(max(self.total_pulls, 1)) / self.base.counts[aid]
                 )
 
             if score > best_score:
@@ -278,7 +288,6 @@ class BayesianUCB:
             return None
 
         q = 1 - 1 / self.t
-
         best_score = -np.inf
         chosen = None
 
@@ -341,29 +350,29 @@ class ThompsonSampling:
 class SharedEpsilonGreedy:
     def __init__(self, d, epsilon=0.1, lr=0.01):
         self.name = "Shared Epsilon Greedy"
-        self.theta = np.zeros(d)
+        self.theta = np.zeros(d, dtype=np.float32)
         self.epsilon = epsilon
         self.lr = lr
         self.last_context = None
 
-    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
+    def select_arm(self, user_features, user_emb_64, candidates, emb_dict, **kwargs):
         valid = [aid for aid in candidates if aid in emb_dict]
         if not valid:
             return None
 
         if np.random.rand() < self.epsilon:
             chosen = np.random.choice(valid)
-            self.last_context = make_context(user_features, emb_dict[chosen])
+            self.last_context = make_context(user_features, emb_dict[chosen], user_emb_64)
             return chosen
 
         scores = []
         contexts = []
         for aid in valid:
-            x = make_context(user_features, emb_dict[aid])
+            x = make_context(user_features, emb_dict[aid], user_emb_64)
             scores.append(x @ self.theta)
             contexts.append(x)
 
-        idx = np.argmax(scores)
+        idx = int(np.argmax(scores))
         self.last_context = contexts[idx]
         return valid[idx]
 
@@ -377,18 +386,18 @@ class SharedLinUCB:
     def __init__(self, d, alpha=1.0):
         self.name = "Shared LinUCB"
         self.alpha = alpha
-        self.A_inv = np.eye(d)
-        self.b = np.zeros(d)
-        self.theta = np.zeros(d)
+        self.A_inv = np.eye(d, dtype=np.float32)
+        self.b = np.zeros(d, dtype=np.float32)
+        self.theta = np.zeros(d, dtype=np.float32)
         self.last_context = None
 
-    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
+    def select_arm(self, user_features, user_emb_64, candidates, emb_dict, **kwargs):
         best_score, best_arm, best_context = -np.inf, None, None
 
         for aid in candidates:
             if aid not in emb_dict:
                 continue
-            x = make_context(user_features, emb_dict[aid])
+            x = make_context(user_features, emb_dict[aid], user_emb_64)
             score = x @ self.theta + self.alpha * np.sqrt(x @ self.A_inv @ x)
             if score > best_score:
                 best_score, best_arm, best_context = score, aid, x
@@ -410,19 +419,19 @@ class SharedLinUCB:
 class SharedTS:
     def __init__(self, d, v=0.3):
         self.name = "Shared Thompson Sampling"
-        self.A_inv = np.eye(d)
-        self.b = np.zeros(d)
-        self.mu = np.zeros(d)
+        self.A_inv = np.eye(d, dtype=np.float32)
+        self.b = np.zeros(d, dtype=np.float32)
+        self.mu = np.zeros(d, dtype=np.float32)
         self.v = v
         self.last_context = None
 
-    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
+    def select_arm(self, user_features, user_emb_64, candidates, emb_dict, **kwargs):
         best_score, best_arm, best_context = -np.inf, None, None
 
         for aid in candidates:
             if aid not in emb_dict:
                 continue
-            x = make_context(user_features, emb_dict[aid])
+            x = make_context(user_features, emb_dict[aid], user_emb_64)
             var = max((self.v ** 2) * (x @ self.A_inv @ x), 1e-6)
             score = np.random.normal(x @ self.mu, np.sqrt(var))
             if score > best_score:
@@ -456,9 +465,9 @@ class DisjointEpsilonGreedy:
 
     def _init_arm(self, aid):
         if aid not in self.theta:
-            self.theta[aid] = np.zeros(self.d)
+            self.theta[aid] = np.zeros(self.d, dtype=np.float32)
 
-    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
+    def select_arm(self, user_features, user_emb_64, candidates, emb_dict, **kwargs):
         valid = [aid for aid in candidates if aid in emb_dict]
         if not valid:
             return None
@@ -466,7 +475,7 @@ class DisjointEpsilonGreedy:
         if np.random.rand() < self.epsilon:
             chosen = np.random.choice(valid)
             self._init_arm(chosen)
-            self.last_context = make_context(user_features, emb_dict[chosen])
+            self.last_context = make_context(user_features, emb_dict[chosen], user_emb_64)
             self.last_arm = chosen
             return chosen
 
@@ -474,11 +483,11 @@ class DisjointEpsilonGreedy:
         contexts = []
         for aid in valid:
             self._init_arm(aid)
-            x = make_context(user_features, emb_dict[aid])
+            x = make_context(user_features, emb_dict[aid], user_emb_64)
             scores.append(x @ self.theta[aid])
             contexts.append(x)
 
-        idx = np.argmax(scores)
+        idx = int(np.argmax(scores))
         self.last_context = contexts[idx]
         self.last_arm = valid[idx]
         return valid[idx]
@@ -505,18 +514,18 @@ class DisjointLinUCB:
 
     def _init_arm(self, aid):
         if aid not in self.A_inv:
-            self.A_inv[aid] = np.eye(self.d)
-            self.b[aid] = np.zeros(self.d)
-            self.theta[aid] = np.zeros(self.d)
+            self.A_inv[aid] = np.eye(self.d, dtype=np.float32)
+            self.b[aid] = np.zeros(self.d, dtype=np.float32)
+            self.theta[aid] = np.zeros(self.d, dtype=np.float32)
 
-    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
+    def select_arm(self, user_features, user_emb_64, candidates, emb_dict, **kwargs):
         best_score, best_arm, best_context = -np.inf, None, None
 
         for aid in candidates:
             if aid not in emb_dict:
                 continue
             self._init_arm(aid)
-            x = make_context(user_features, emb_dict[aid])
+            x = make_context(user_features, emb_dict[aid], user_emb_64)
             score = x @ self.theta[aid] + self.alpha * np.sqrt(x @ self.A_inv[aid] @ x)
             if score > best_score:
                 best_score, best_arm, best_context = score, aid, x
@@ -550,18 +559,18 @@ class DisjointTS:
 
     def _init_arm(self, aid):
         if aid not in self.A_inv:
-            self.A_inv[aid] = np.eye(self.d)
-            self.b[aid] = np.zeros(self.d)
-            self.mu[aid] = np.zeros(self.d)
+            self.A_inv[aid] = np.eye(self.d, dtype=np.float32)
+            self.b[aid] = np.zeros(self.d, dtype=np.float32)
+            self.mu[aid] = np.zeros(self.d, dtype=np.float32)
 
-    def select_arm(self, user_features, candidates, emb_dict, **kwargs):
+    def select_arm(self, user_features, user_emb_64, candidates, emb_dict, **kwargs):
         best_score, best_arm, best_context = -np.inf, None, None
 
         for aid in candidates:
             if aid not in emb_dict:
                 continue
             self._init_arm(aid)
-            x = make_context(user_features, emb_dict[aid])
+            x = make_context(user_features, emb_dict[aid], user_emb_64)
             var = max((self.v ** 2) * (x @ self.A_inv[aid] @ x), 1e-6)
             score = np.random.normal(x @ self.mu[aid], np.sqrt(var))
             if score > best_score:
@@ -599,6 +608,7 @@ def test_algo(algo, df, emb_dict, news_to_cat):
     for i, row in enumerate(df.itertuples(), start=1):
         chosen = algo.select_arm(
             user_features=row.user_features,
+            user_emb_64=row.user_emb_64,
             candidates=row.candidate_ids,
             emb_dict=emb_dict,
             news_to_cat=news_to_cat
@@ -620,7 +630,7 @@ def test_algo(algo, df, emb_dict, news_to_cat):
         if i % 1000 == 0 or i == total_rows:
             curr = time.time()
             elapsed = curr - start_time
-            speed = 1000 / (curr - last_print_time) if i > 1000 else i / elapsed
+            speed = 1000 / (curr - last_print_time) if i > 1000 else i / max(elapsed, 1e-9)
             ctr = cumulative_reward / i
             print(f"{i:10d} | {(i/total_rows)*100:7.1f}% | {cumulative_reward:10d} | {ctr:8.4f} | {speed:7.1f} s/s")
             last_print_time = curr
@@ -644,7 +654,7 @@ if __name__ == "__main__":
     base_seed = 4014
 
     df_eval = users_interaction.sample(frac=1, random_state=base_seed).reset_index(drop=True)
-    context_dim = len(df_eval.iloc[0]["user_features"]) + 64
+    context_dim = len(df_eval.iloc[0]["user_features"]) + 64 + 1
 
     algo_map = {
         "eps": lambda: EpsilonGreedy(),
