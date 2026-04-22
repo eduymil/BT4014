@@ -43,10 +43,11 @@ The results of the simulations are already available in the `/results` directory
 
 ### Option 1: Using GitHub Actions (Remote)
 If you wish to re-run the algorithm and generate fresh results using GitHub Actions:
-1. Go to the GitHub Actions page: [https://github.com/eduymil/BT4014/actions](https://github.com/eduymil/BT4014/actions)
-2. Download the generated CSV results from the latest successful workflow run.
-3. Place the downloaded CSV files into the local `/results` directory.
-4. Open and run the `BT4014_Plots.ipynb` notebook to perform the analysis and view the plots based on the new data.
+1. Go to the GitHub [Actions](https://github.com/eduymil/BT4014/actions) page.
+2. **To trigger a manual run:** Select the "Run Bandit Simulations and Save Output" workflow on the left, click the **"Run workflow"** button, and select the branch (usually `main`).
+3. **To download results:** Click on the latest successful workflow run, scroll down to **Artifacts**, and download the results.
+4. Place the downloaded CSV files into the local `/results` directory.
+5. Open and run the `BT4014_Plots.ipynb` notebook to perform the analysis and view the plots based on the new data.
 
 ### Option 2: Running Locally
 If you prefer to run the simulation locally:
