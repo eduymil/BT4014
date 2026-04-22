@@ -39,3 +39,22 @@ We use the Microsoft MIND (News Recommendation Dataset).
 3. simulation.py: Core script that runs the **bandit algorithms**
 
 ## Instructions
+The results of the simulations are already available in the `/results` directory. You can directly run the `BT4014_Plots.ipynb` notebook to analyze and visualize these existing results.
+
+### Option 1: Using GitHub Actions (Remote)
+If you wish to re-run the algorithm and generate fresh results using GitHub Actions:
+1. Go to the GitHub Actions page: [https://github.com/eduymil/BT4014/actions](https://github.com/eduymil/BT4014/actions)
+2. Download the generated CSV results from the latest successful workflow run.
+3. Place the downloaded CSV files into the local `/results` directory.
+4. Open and run the `BT4014_Plots.ipynb` notebook to perform the analysis and view the plots based on the new data.
+
+### Option 2: Running Locally
+If you prefer to run the simulation locally:
+1. Ensure the `dataset` folder is present in your project directory containing: `news.tsv`, `behaviors.tsv`, and `article_embeddings.npy`.
+2. Open a terminal in the project directory.
+3. Execute the script using Python and provide an algorithm name:
+   ```bash
+   python run_simulation.py <algo_name>
+   ```
+   *Available Algorithms:* `eps`, `decay_eps`, `softmax`, `ucb1`, `bayes_ucb`, `ts`, `shared_eps`, `shared_linucb`, `shared_ts`, `disjoint_eps`, `disjoint_linucb`, `disjoint_ts`
+4. The script will generate a new `results_<algo_name>.csv` file. To analyze new findings, move this file to `/results` and run the `BT4014_Plots.ipynb` notebook.
